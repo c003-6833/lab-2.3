@@ -1,60 +1,105 @@
 import json
 from collections import defaultdict, Counter
+from datetime import datetime, timedelta
 import matplotlib.pyplot as plt
 
-log_file = "sample_auth_small.log"
-incident_file = "bruteforce_incidents.txt"
-report_file = "bruteforce_report.txt"
+LOGFILE = "sample_auth_small.log"
+YEAR = 2025
 
-# Step 1: Parse log and aggregate failed attempts by IP
-failed_attempts = defaultdict(list)  # IP -> list of timestamps (string or datetime)
+def parse_auth_line(line):
+    """
+    Parse an auth log line and return (timestamp, ip, event_type)
+    """
+    parts = line.split()
+    ts_str = " ".join(parts[0:3])
+    try:
+        ts = datetime.strptime(f"{YEAR} {ts_str}", "%Y %b %d %H:%M:%S")
+    except Exception:
+        print("Failed to parse:", line.strip(), "| ts_str:", ts_str)
+        return None, None, "other"
 
-with open(log_file) as f:
-    for line in f:
-        line = line.strip()
-        if not line:
-            continue
-        # Example line parsing: adjust if your log format differs
-        # Let's assume a simple format like:
-        # TIMESTAMP IP MESSAGE
-        # And failed attempts include "Failed password" or similar text
-        
-        # For example: "2025-09-29 15:20:33 203.0.113.45 Failed password for user"
-        if "Failed password" in line:
-            parts = line.split()
-            # naive parsing example:
-            # timestamp = parts[0] + " " + parts[1]
-            # ip = parts[2]
-            # You will need to adjust this based on actual log format
+    ip = None
+    event_type = "other"
+    if "Failed password" in line:
+        event_type = "failed"
+    elif "Accepted password" in line or "Accepted publickey" in line:
+        event_type = "accepted"
 
-            timestamp = parts[0] + " " + parts[1]
-            ip = parts[2]
-            failed_attempts[ip].append(timestamp)
+    if " from " in line:
+        try:
+            idx = parts.index("from")
+            ip = parts[idx + 1]
+        except (ValueError, IndexError):
+            ip = None
 
-# Step 2: Create incidents (here, incidents = total failed attempts per IP)
-ip_fail_counts = {ip: len(times) for ip, times in failed_attempts.items()}
+    return ts, ip, event_type
 
-# Step 3: Save incidents (failed attempts per IP) to a pretty JSON file
-with open(incident_file, 'w') as f:
-    json.dump(failed_attempts, f, indent=4)
+if __name__ == "__main__":
+    # --- Task 1: Parse log ---
+    per_ip_timestamps = defaultdict(list)
 
-# Step 4: Generate summary report of top offending IPs
-top_offenders = Counter(ip_fail_counts).most_common(10)
+    with open(LOGFILE) as f:
+        for line in f:
+            ts, ip, event = parse_auth_line(line)
+            if ts and ip and event == "failed":
+                per_ip_timestamps[ip].append(ts)
 
-with open(report_file, 'w') as f:
-    f.write("Top offending IPs by failed login attempts:\n")
-    for ip, count in top_offenders:
-        f.write(f"{ip}: {count} failed attempts\n")
+    for ip in per_ip_timestamps:
+        per_ip_timestamps[ip].sort()
 
-# Optional Step 5: Plot bar chart of top 10 attacker IPs
-ips = [ip for ip, _ in top_offenders]
-counts = [count for _, count in top_offenders]
+    # --- Task 2: Detect brute-force incidents ---
+    incidents = []
+    window = timedelta(minutes=10)
 
-plt.figure(figsize=(8,4))
-plt.bar(ips, counts)
-plt.title("Top attacker IPs")
-plt.xlabel("IP")
-plt.ylabel("Failed attempts")
-plt.tight_layout()
-plt.savefig("top_attackers.png")
-plt.show()
+    for ip, times in per_ip_timestamps.items():
+        n = len(times)
+        i = 0
+        while i < n:
+            j = i
+            while j + 1 < n and (times[j + 1] - times[i]) <= window:
+                j += 1
+            count = j - i + 1
+            if count >= 5:
+                incidents.append({
+                    "ip": ip,
+                    "count": count,
+                    "first": times[i].isoformat(),
+                    "last": times[j].isoformat()
+                })
+                i = j + 1  # skip cluster
+            else:
+                i += 1
+
+    # --- Task 3a: Save incidents report ---
+    with open("bruteforce_incidents.txt", "w") as f:
+        f.write("Detected {} brute-force incidents\n\n".format(len(incidents)))
+        f.write(json.dumps(incidents, indent=2))
+
+    print(f"Saved {len(incidents)} incidents to bruteforce_incidents.txt")
+
+    # --- Task 3b: Summarize top IPs ---
+    failed_counts = {ip: len(times) for ip, times in per_ip_timestamps.items()}
+    top_attackers = Counter(failed_counts).most_common(10)
+
+    print("\nTop attacker IPs:")
+    for ip, count in top_attackers:
+        print(f"{ip}: {count} failed attempts")
+
+    with open("bruteforce_incidents.txt", "a") as f:
+        f.write("\n\nTop attacker IPs:\n")
+        for ip, count in top_attackers:
+            f.write(f"{ip}: {count} failed attempts\n")
+
+    # --- Task 3c: Optional bar chart ---
+    if top_attackers:
+        ips, counts = zip(*top_attackers)
+        plt.figure(figsize=(8,4))
+        plt.bar(ips, counts)
+        plt.title("Top attacker IPs")
+        plt.xlabel("IP")
+        plt.ylabel("Failed attempts")
+        plt.tight_layout()
+        plt.savefig("top_attackers.png")
+        plt.show()
+        print("Saved bar chart as top_attackers.png")
+
